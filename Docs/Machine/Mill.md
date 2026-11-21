@@ -15,12 +15,15 @@
 ### 동작 개요
 
 ```
-배치(상점 Mill) → 클릭으로 벼를 inputPort에 투입
+배치(상점 Mill) → 맨손 클릭 → 기계 UI
+  → 인벤 벼를 인풋으로 (LMB 드래그 또는 Shift+우클릭 자동 배치)
   → TickStart: 인풋 소비, WIP 시작
   → 매 틱 TickComplete: progress += workSpeed
   → progress ≥ recipeTime 이면 outputPort에 비료
-  → 클릭으로 비료 수령
+  → 아웃풋에서 인벤으로 드래그/클릭 회수 (아웃풋에는 투입 불가)
 ```
+
+UI: `MachineIoPanel` (DungeonFront `MachineRecipeUI` 포트 이송 참고).
 
 | 항목 | 값 |
 |------|-----|

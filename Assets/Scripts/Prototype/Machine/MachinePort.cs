@@ -2,6 +2,8 @@ using System.Collections.Generic;
 
 namespace GuideToNonstopHarvest.Prototype.Machine
 {
+    // List used by CopyEntries for machine UI snapshots.
+    // List used by CopyEntries for machine UI snapshots.
     /// <summary>
     /// 기계 입/출력 포트. DungeonFront ItemEntryList의 단순 버전.
     /// </summary>
@@ -92,5 +94,17 @@ namespace GuideToNonstopHarvest.Prototype.Machine
         }
 
         public void Clear() => _counts.Clear();
+
+        /// <summary>UI용 스냅샷. id≠None 이고 count&gt;0만.</summary>
+        public void CopyEntries(List<MachineItemStack> dest)
+        {
+            if (dest == null) return;
+            dest.Clear();
+            foreach (var kv in _counts)
+            {
+                if (kv.Key == MachineItemId.None || kv.Value <= 0) continue;
+                dest.Add(new MachineItemStack(kv.Key, kv.Value));
+            }
+        }
     }
 }

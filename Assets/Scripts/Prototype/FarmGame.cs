@@ -1,5 +1,6 @@
 using System.Collections.Generic;
 using System.Text;
+using GuideToNonstopHarvest.Prototype.Machine;
 using UnityEngine;
 using UnityEngine.EventSystems;
 using UnityEngine.InputSystem;
@@ -80,6 +81,8 @@ namespace GuideToNonstopHarvest.Prototype
         Text _invButtonLabel;
 
         Sprite _pixelSprite;
+        MachineIoPanel _machinePanel;
+        Transform _uiCanvasRoot;
 
         [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.AfterSceneLoad)]
         static void AutoBoot()
@@ -107,6 +110,7 @@ namespace GuideToNonstopHarvest.Prototype
             float tickDelta = GameTicks.Delta(Time.deltaTime);
             _grid.Tick(Time.deltaTime);
             _trade.Tick(tickDelta, _inv);
+            _machinePanel?.Tick();
             // 교역 시한 표시 갱신 (0.5초)
             if (_shopTab == ShopTab.Trade)
             {
@@ -194,6 +198,7 @@ namespace GuideToNonstopHarvest.Prototype
             canvasGo.AddComponent<Canvas>().renderMode = RenderMode.ScreenSpaceOverlay;
             canvasGo.AddComponent<CanvasScaler>().uiScaleMode = CanvasScaler.ScaleMode.ScaleWithScreenSize;
             canvasGo.AddComponent<GraphicRaycaster>();
+            _uiCanvasRoot = canvasGo.transform;
 
             _hudGold = MakeText(canvasGo.transform, "Gold", Ui(10, -10), 22);
             _hudTool = MakeText(canvasGo.transform, "Tool", Ui(10, -40), 15);
@@ -272,6 +277,16 @@ namespace GuideToNonstopHarvest.Prototype
             gbg.color = new Color(0.1f, 0.12f, 0.16f, 0.96f);
             _groundMenuContent = _groundMenuRoot.transform;
             _groundMenuRoot.SetActive(false);
+
+            Font uiFont = Resources.GetBuiltinResource<Font>("LegacyRuntime.ttf")
+                          ?? Resources.GetBuiltinResource<Font>("Arial.ttf");
+            _machinePanel = new MachineIoPanel(
+                _uiCanvasRoot,
+                _pixelSprite,
+                uiFont,
+                () => _inv,
+                msg => _status = msg,
+                RefreshAllPanels);
         }
 
         void ToggleInventory()
@@ -969,14 +984,16 @@ namespace GuideToNonstopHarvest.Prototype
             // 맨손
             if (_activeSlot == SlotId.Hand)
             {
-                if (cell.Kind == CellKind.Machine)
+                if (cell.Kind == CellKind.Machine && cell.Machine != null)
                 {
-                    if (_grid.TryInteractMachine(x, y, _inv, out string msg))
+                    CloseGroundMenu();
+                    if (_inventoryOpen)
                     {
-                        _status = msg;
-                        RefreshAllPanels();
+                        _inventoryOpen = false;
+                        _inventoryRoot.SetActive(false);
                     }
-                    else _status = msg ?? "실패";
+
+                    _machinePanel.Open(cell.Machine, new Vector2Int(x, y));
                     return;
                 }
 

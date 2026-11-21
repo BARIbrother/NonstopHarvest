@@ -72,5 +72,9 @@ namespace GuideToNonstopHarvest.Prototype.Machine
 
         public bool TryTakeAnyOutput(out MachineItemId id, out int count) =>
             OutputPort.TryTakeFirst(out id, out count);
+
+        /// <summary>인풋 포트에서 회수 (기계 UI).</summary>
+        public bool TryTakeInput(MachineItemId id, int count, out int taken) =>
+            InputPort.TryTake(id, count, out taken);
     }
 }
