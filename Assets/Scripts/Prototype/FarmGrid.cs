@@ -185,6 +185,10 @@ namespace GuideToNonstopHarvest.Prototype
             return true;
         }
 
+        /// <summary>
+        /// 교접 지지대: 상하좌우 <b>Mature</b> 작물만 부모.
+        /// 후보 Species → 환경 필터 → 랜덤 1종 → 스탯 상속 후 지지대 칸에서 성장 시작(Elapsed=0).
+        /// </summary>
         public bool TryPlaceBreedingSupport(int x, int y, InventoryState inv)
         {
             if (!InBounds(x, y)) return false;
@@ -201,7 +205,8 @@ namespace GuideToNonstopHarvest.Prototype
                 int ny = y + Cardinals[i].y;
                 if (!InBounds(nx, ny)) continue;
                 FarmCell n = _cells[nx, ny];
-                if (n.Kind != CellKind.Crop) continue;
+                // 다 자란(Mature) 작물만 부모 — 미성숙은 무시
+                if (n.Kind != CellKind.Crop || !n.IsMature) continue;
                 parents.Add(n.Stats);
                 parentCells.Add(n);
                 if (n.Fertilizer.BreedFloorActive)
@@ -209,17 +214,16 @@ namespace GuideToNonstopHarvest.Prototype
             }
 
             if (parents.Count < 1) return false;
+
+            List<CropSpecies> candidates = BreedingRules.CollectOffspringCandidates(parents);
+            List<CropSpecies> growable = BreedingRules.FilterByEnvironment(candidates);
+            if (!BreedingRules.TryPickSpecies(growable, out CropSpecies species))
+                return false;
+
             if (!inv.TryConsumeSupport()) return false;
 
-            // 동종 부모만 허용 (이종·향료 교차는 stub)
-            CropSpecies species = parents[0].Species;
-            for (int i = 1; i < parents.Count; i++)
-            {
-                if (parents[i].Species != species)
-                    return false;
-            }
-
-            CropStats child = BreedingRules.Inherit(parents, anyBreedFloor);
+            CropStats child = BreedingRules.InheritAs(species, parents, anyBreedFloor);
+            // Plant: ElapsedTicks=0 → 다시 성장. Mature로 즉시 퍼지지 않음.
             cell.Plant(child, statsRevealed: false);
 
             if (anyBreedFloor)
@@ -267,11 +271,13 @@ namespace GuideToNonstopHarvest.Prototype
             return true;
         }
 
+        /// <summary>비료 살포. 효과가 남아 있으면 재살포 불가.</summary>
         public bool TrySprayFertilizer(int x, int y, InventoryState inv)
         {
             if (!InBounds(x, y)) return false;
             FarmCell cell = _cells[x, y];
             if (cell.Kind != CellKind.Crop) return false;
+            if (cell.Fertilizer.AnyActive) return false;
             if (!inv.TryConsumeFertilizer()) return false;
             cell.Fertilizer = FertilizerState.FullSpray;
             return true;
