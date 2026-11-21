@@ -288,8 +288,7 @@ namespace GuideToNonstopHarvest.Prototype
         }
 
         /// <summary>
-        /// Mill 클릭: 아웃풋 수령 우선, 아니면 인벤 벼→인풋 투입.
-        /// (DungeonFront 포트 이송 UI의 원클릭 축소판)
+        /// Mill 원클릭 이송(레거시). 프로토 UI는 <see cref="Machine.MachineIoPanel"/> 사용.
         /// </summary>
         public bool TryInteractMachine(int x, int y, InventoryState inv, out string message)
         {
