@@ -9,6 +9,7 @@ namespace GuideToNonstopHarvest.Prototype
     public sealed class InventoryState
     {
         public const int RiceSellPrice = 10;
+        public const int StarterSeedBuyPrice = 20;
         public const int SupportBuyPrice = 5;
         public const int MillBuyPrice = 100;
         public const int SprayerBuyPrice = 0;
@@ -113,6 +114,17 @@ namespace GuideToNonstopHarvest.Prototype
             Gold += gained;
             RiceCrops = 0;
             return gained;
+        }
+
+        /// <summary>벼 씨앗 0/0 개당 20G 구매 (`Docs/Crops/Rice.md`).</summary>
+        public bool TryBuyStarterRiceSeed(int count = 1)
+        {
+            if (count <= 0) return false;
+            int cost = StarterSeedBuyPrice * count;
+            if (Gold < cost) return false;
+            Gold -= cost;
+            AddSeed(RiceStats.Starter, count);
+            return true;
         }
 
         public bool TryBuySupport()

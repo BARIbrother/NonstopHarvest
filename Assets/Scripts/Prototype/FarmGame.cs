@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using System.Text;
 using UnityEngine;
 using UnityEngine.EventSystems;
 using UnityEngine.InputSystem;
@@ -8,7 +9,8 @@ using UnityEngine.UI;
 namespace GuideToNonstopHarvest.Prototype
 {
     /// <summary>
-    /// 프로토타입 진입점. 밭·퀵슬롯·Mill·비료 뿌리개 UI/입력을 런타임 조립.
+    /// 퀵슬롯: 맨손/배치/획득도구.
+    /// 맨손 우클릭(짧게)=땅 메뉴(심기·교접·파내기), 길게=스탯 개봉.
     /// </summary>
     public sealed class FarmGame : MonoBehaviour
     {
@@ -16,22 +18,34 @@ namespace GuideToNonstopHarvest.Prototype
         const float Gap = 0.05f;
         const float UiScale = 0.7f;
         const float InspectHoldTicks = 20f;
-        const int QuickSlotCount = 5;
+        const float GroundMenuClickMaxTicks = 5f;
+        const int QuickSlotCount = 3;
 
-        enum QuickTool
+        enum ShopTab { Buy, Sell }
+        enum PlaceBuilding { None, Mill }
+        enum GroundMenuMode { Closed, Actions, PickSeed }
+
+        /// <summary>0맨손 1배치 2획득(뿌리개)</summary>
+        enum SlotId
         {
-            Plant = 0,
-            Breed = 1,
-            Spray = 2,
-            Mill = 3,
-            None = 4
+            Hand = 0,
+            Place = 1,
+            Obtained0 = 2
         }
 
         FarmGrid _grid;
         InventoryState _inv;
-        QuickTool _tool = QuickTool.Plant;
-        int _selectedSeedIndex;
-        string _status = "퀵슬롯으로 도구 선택 | 우클릭 1초: 스탯 공개";
+
+        SlotId _activeSlot = SlotId.Hand;
+        PlaceBuilding _placeBuilding = PlaceBuilding.None;
+        ShopTab _shopTab = ShopTab.Buy;
+        bool _inventoryOpen;
+        string _status = "맨손:수확·기계 | 우클릭:땅메뉴/스탯 | 인벤:중앙하단";
+
+        GroundMenuMode _groundMenuMode = GroundMenuMode.Closed;
+        Vector2Int _groundMenuCell;
+        GameObject _groundMenuRoot;
+        Transform _groundMenuContent;
 
         Camera _cam;
         readonly Dictionary<Vector2Int, SpriteRenderer> _cellViews = new Dictionary<Vector2Int, SpriteRenderer>();
@@ -43,27 +57,30 @@ namespace GuideToNonstopHarvest.Prototype
         float _inspectHoldTicks;
         float _revealPunchTicks;
         Vector2Int _revealPunchCell;
-
         bool _sprayHolding;
         Vector2Int _sprayCell;
         float _sprayHoldTicks;
+        bool _handRightPending;
+        Vector2Int _handRightCell;
+        float _handRightHoldTicks;
 
         Text _hudGold;
-        Text _hudInv;
         Text _hudStatus;
         Text _hudTool;
-        Transform _seedButtonRoot;
-        Transform _quickSlotRoot;
+        Transform _shopPanel;
+        Transform _contextPanel;
+        GameObject _inventoryRoot;
+        Transform _inventoryContent;
         readonly Button[] _quickButtons = new Button[QuickSlotCount];
         readonly Text[] _quickLabels = new Text[QuickSlotCount];
-        Button _buySprayerBtn;
+        Text _invButtonLabel;
 
         Sprite _pixelSprite;
 
         [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.AfterSceneLoad)]
         static void AutoBoot()
         {
-            if (FindFirstObjectByType<FarmGame>() != null) return;
+            if (FindAnyObjectByType<FarmGame>() != null) return;
             new GameObject("FarmGame").AddComponent<FarmGame>();
         }
 
@@ -76,9 +93,7 @@ namespace GuideToNonstopHarvest.Prototype
             EnsureEventSystem();
             BuildBoard();
             BuildUi();
-            RefreshSeedButtons();
-            RefreshQuickSlots();
-            RefreshHud();
+            RefreshAllPanels();
             RefreshBoardVisuals();
         }
 
@@ -115,7 +130,7 @@ namespace GuideToNonstopHarvest.Prototype
 
         static void EnsureEventSystem()
         {
-            if (FindFirstObjectByType<EventSystem>() != null) return;
+            if (FindAnyObjectByType<EventSystem>() != null) return;
             var es = new GameObject("EventSystem");
             es.AddComponent<EventSystem>();
             es.AddComponent<InputSystemUIInputModule>();
@@ -125,14 +140,12 @@ namespace GuideToNonstopHarvest.Prototype
         {
             var boardRoot = new GameObject("Board").transform;
             boardRoot.SetParent(transform, false);
-
             for (int y = 0; y < FarmGrid.Size; y++)
             for (int x = 0; x < FarmGrid.Size; x++)
             {
                 var cellGo = new GameObject($"Cell_{x}_{y}");
                 cellGo.transform.SetParent(boardRoot, false);
                 cellGo.transform.position = new Vector3(x, y, 0f);
-
                 var sr = cellGo.AddComponent<SpriteRenderer>();
                 sr.sprite = _pixelSprite;
                 float scale = CellWorldSize - Gap;
@@ -149,7 +162,6 @@ namespace GuideToNonstopHarvest.Prototype
                 tm.characterSize = 0.35f;
                 tm.fontSize = 32;
                 tm.color = Color.white;
-                tm.text = "";
 
                 var key = new Vector2Int(x, y);
                 _cellViews[key] = sr;
@@ -167,161 +179,420 @@ namespace GuideToNonstopHarvest.Prototype
             canvasGo.AddComponent<GraphicRaycaster>();
 
             _hudGold = MakeText(canvasGo.transform, "Gold", Ui(10, -10), 22);
-            _hudInv = MakeText(canvasGo.transform, "Inv", Ui(10, -40), 16);
-            _hudTool = MakeText(canvasGo.transform, "Tool", Ui(10, -130), 16);
-            _hudStatus = MakeText(canvasGo.transform, "Status", Ui(10, -160), 15);
+            _hudTool = MakeText(canvasGo.transform, "Tool", Ui(10, -40), 15);
+            _hudStatus = MakeText(canvasGo.transform, "Status", Ui(10, -70), 14);
             _hudStatus.color = new Color(0.85f, 0.9f, 0.7f);
 
-            MakeButton(canvasGo.transform, "벼 판매", Ui(10, -210), () =>
-            {
-                int g = _inv.SellAllRice();
-                _status = g > 0 ? $"벼 판매 +{g}G" : "팔 벼 없음";
-            });
-            MakeButton(canvasGo.transform, "지지대(5G)", Ui(110, -210), () =>
-            {
-                _status = _inv.TryBuySupport() ? "지지대 +1" : "골드 부족";
-            });
-            MakeButton(canvasGo.transform, "Mill(100G)", Ui(220, -210), () =>
-            {
-                if (_inv.TryBuyMill())
-                {
-                    _status = "Mill 획득. 퀵슬롯 Mill로 빈 칸에 배치";
-                    _tool = QuickTool.Mill;
-                }
-                else _status = "골드 부족";
-            }, 120f * UiScale);
+            var shopGo = new GameObject("Shop");
+            shopGo.transform.SetParent(canvasGo.transform, false);
+            var shopRt = shopGo.AddComponent<RectTransform>();
+            shopRt.anchorMin = shopRt.anchorMax = new Vector2(0, 1);
+            shopRt.pivot = new Vector2(0, 1);
+            shopRt.anchoredPosition = Ui(10, -120);
+            shopRt.sizeDelta = Ui(340, 260);
+            _shopPanel = shopGo.transform;
 
-            _buySprayerBtn = MakeButton(canvasGo.transform, "뿌리개(0G)", Ui(10, -250), () =>
-            {
-                if (_inv.TryBuySprayer())
-                {
-                    _status = "비료 뿌리개 획득";
-                    _tool = QuickTool.Spray;
-                }
-                else if (!_inv.SprayerUnlocked) _status = "첫 비료 후 해금";
-                else if (_inv.OwnsSprayer) _status = "이미 보유";
-                else _status = "구매 실패";
-                RefreshQuickSlots();
-            });
+            var ctxGo = new GameObject("Context");
+            ctxGo.transform.SetParent(canvasGo.transform, false);
+            var ctxRt = ctxGo.AddComponent<RectTransform>();
+            ctxRt.anchorMin = ctxRt.anchorMax = ctxRt.pivot = new Vector2(1, 1);
+            ctxRt.anchoredPosition = Ui(-10, -10);
+            ctxRt.sizeDelta = Ui(300, 400);
+            _contextPanel = ctxGo.transform;
 
-            var seedRootGo = new GameObject("SeedButtons");
-            seedRootGo.transform.SetParent(canvasGo.transform, false);
-            var srt = seedRootGo.AddComponent<RectTransform>();
-            srt.anchorMin = srt.anchorMax = srt.pivot = new Vector2(1, 1);
-            srt.anchoredPosition = Ui(-10, -10);
-            srt.sizeDelta = Ui(280, 400);
-            _seedButtonRoot = seedRootGo.transform;
-            MakeText(seedRootGo.transform, "SeedTitle", Vector2.zero, 16).text = "씨앗 목록";
+            // 중앙 하단: 인벤 트리거 + 퀵슬롯
+            var bottom = new GameObject("BottomBar");
+            bottom.transform.SetParent(canvasGo.transform, false);
+            var brt = bottom.AddComponent<RectTransform>();
+            brt.anchorMin = brt.anchorMax = new Vector2(0.5f, 0f);
+            brt.pivot = new Vector2(0.5f, 0f);
+            brt.anchoredPosition = new Vector2(0f, 8f);
+            brt.sizeDelta = new Vector2(560f * UiScale, 100f * UiScale);
 
-            var qsGo = new GameObject("QuickSlots");
-            qsGo.transform.SetParent(canvasGo.transform, false);
-            var qrt = qsGo.AddComponent<RectTransform>();
-            qrt.anchorMin = new Vector2(0.5f, 0f);
-            qrt.anchorMax = new Vector2(0.5f, 0f);
-            qrt.pivot = new Vector2(0.5f, 0f);
-            qrt.anchoredPosition = new Vector2(0f, 12f);
-            qrt.sizeDelta = new Vector2(520f * UiScale, 50f * UiScale);
-            _quickSlotRoot = qsGo.transform;
+            var invBtn = MakeButton(bottom.transform, "인벤토리", new Vector2(0, 0), ToggleInventory, 120f * UiScale);
+            var invRt = invBtn.GetComponent<RectTransform>();
+            invRt.anchorMin = invRt.anchorMax = new Vector2(0.5f, 0f);
+            invRt.pivot = new Vector2(0.5f, 0f);
+            invRt.anchoredPosition = new Vector2(0f, 52f * UiScale);
+            _invButtonLabel = invBtn.GetComponentInChildren<Text>();
 
-            string[] names = { "심기", "교접", "뿌리개", "Mill", "-" };
-            float slotW = 90f * UiScale;
-            float startX = -2.5f * slotW;
+            float slotW = 88f * UiScale;
+            float startX = -1.5f * slotW;
             for (int i = 0; i < QuickSlotCount; i++)
             {
                 int idx = i;
-                var btn = MakeButton(_quickSlotRoot, names[i], new Vector2(startX + i * (slotW + 6f), 0f),
-                    () => SelectTool((QuickTool)idx), slotW);
-                // MakeButton uses top-left anchors; re-anchor to bottom center parent
+                var btn = MakeButton(bottom.transform, $"S{i}", Vector2.zero, () => SelectSlot((SlotId)idx), slotW);
                 var rt = btn.GetComponent<RectTransform>();
                 rt.anchorMin = rt.anchorMax = new Vector2(0.5f, 0f);
                 rt.pivot = new Vector2(0.5f, 0f);
-                rt.anchoredPosition = new Vector2(startX + i * (slotW + 6f) + slotW * 0.5f, 0f);
+                rt.anchoredPosition = new Vector2(startX + i * (slotW + 6f) + slotW * 0.5f, 4f);
                 _quickButtons[i] = btn;
                 _quickLabels[i] = btn.GetComponentInChildren<Text>();
             }
+
+            // 인벤토리 오버레이 (중앙)
+            _inventoryRoot = new GameObject("InventoryPanel");
+            _inventoryRoot.transform.SetParent(canvasGo.transform, false);
+            var irt = _inventoryRoot.AddComponent<RectTransform>();
+            irt.anchorMin = new Vector2(0.5f, 0.5f);
+            irt.anchorMax = new Vector2(0.5f, 0.5f);
+            irt.pivot = new Vector2(0.5f, 0.5f);
+            irt.anchoredPosition = new Vector2(0f, 40f);
+            irt.sizeDelta = new Vector2(420f * UiScale, 380f * UiScale);
+            var bg = _inventoryRoot.AddComponent<Image>();
+            bg.color = new Color(0.08f, 0.1f, 0.14f, 0.94f);
+            _inventoryContent = _inventoryRoot.transform;
+            _inventoryRoot.SetActive(false);
+
+            // 땅 액션 메뉴 (화면 중앙)
+            _groundMenuRoot = new GameObject("GroundMenu");
+            _groundMenuRoot.transform.SetParent(canvasGo.transform, false);
+            var grt = _groundMenuRoot.AddComponent<RectTransform>();
+            grt.anchorMin = grt.anchorMax = grt.pivot = new Vector2(0.5f, 0.5f);
+            grt.anchoredPosition = new Vector2(0f, 20f);
+            grt.sizeDelta = new Vector2(300f * UiScale, 260f * UiScale);
+            var gbg = _groundMenuRoot.AddComponent<Image>();
+            gbg.color = new Color(0.1f, 0.12f, 0.16f, 0.96f);
+            _groundMenuContent = _groundMenuRoot.transform;
+            _groundMenuRoot.SetActive(false);
         }
 
-        void SelectTool(QuickTool tool)
+        void ToggleInventory()
         {
-            if (tool == QuickTool.Spray && !_inv.OwnsSprayer)
+            _inventoryOpen = !_inventoryOpen;
+            _inventoryRoot.SetActive(_inventoryOpen);
+            if (_inventoryOpen) RefreshInventoryPanel();
+            if (_invButtonLabel != null)
+                _invButtonLabel.text = _inventoryOpen ? "인벤 닫기" : "인벤토리";
+        }
+
+        void SelectSlot(SlotId slot)
+        {
+            if (slot == SlotId.Obtained0 && !_inv.OwnsSprayer)
             {
-                _status = _inv.SprayerUnlocked ? "상점에서 뿌리개(0G) 구매" : "첫 비료 후 뿌리개 해금";
+                _status = _inv.SprayerUnlocked ? "상점에서 뿌리개 구매" : "첫 비료 후 뿌리개 해금";
                 return;
             }
 
-            if (tool == QuickTool.Mill && _inv.MillsInInventory <= 0)
-            {
-                _status = "Mill 없음 (100G 구매)";
-                return;
-            }
-
-            if (tool == QuickTool.None) return;
-            _tool = tool;
+            _activeSlot = slot;
             CancelSpray();
-            _status = ToolStatus(_tool);
+            CancelHandRight();
+            CloseGroundMenu();
+            if (slot != SlotId.Place) _placeBuilding = PlaceBuilding.None;
+            RefreshAllPanels();
+            _status = SlotStatus();
         }
 
-        static string ToolStatus(QuickTool t) => t switch
+        string SlotStatus() => _activeSlot switch
         {
-            QuickTool.Plant => "도구: 심기/수확",
-            QuickTool.Breed => "도구: 교접 지지대",
-            QuickTool.Spray => "도구: 비료 뿌리개 (좌클릭 호버 0.5초)",
-            QuickTool.Mill => "도구: Mill 배치",
-            _ => "도구: -"
+            SlotId.Hand => "맨손: 수확·기계 | 우클릭 짧게=땅메뉴 / 길게=스탯",
+            SlotId.Place => _placeBuilding == PlaceBuilding.Mill
+                ? "배치: Mill (그리드 1×1)"
+                : "배치: 건물 선택",
+            SlotId.Obtained0 => "뿌리개: 작물 위 좌클릭 0.5초",
+            _ => ""
         };
 
         void RefreshQuickSlots()
         {
             if (_quickLabels[0] == null) return;
-            _quickLabels[0].text = Mark(QuickTool.Plant, "심기");
-            _quickLabels[1].text = Mark(QuickTool.Breed, "교접");
+            _quickLabels[0].text = Mark(SlotId.Hand, "맨손");
+            _quickLabels[1].text = Mark(SlotId.Place, "배치");
             _quickLabels[2].text = _inv.OwnsSprayer
-                ? Mark(QuickTool.Spray, "뿌리개")
-                : (_inv.SprayerUnlocked ? "뿌리개?" : "잠김");
-            _quickLabels[3].text = _inv.MillsInInventory > 0
-                ? Mark(QuickTool.Mill, $"Mill×{_inv.MillsInInventory}")
-                : "Mill";
-            _quickLabels[4].text = "-";
-
-            if (_buySprayerBtn != null)
-                _buySprayerBtn.gameObject.SetActive(_inv.SprayerUnlocked && !_inv.OwnsSprayer);
+                ? Mark(SlotId.Obtained0, "뿌리개")
+                : "잠김";
         }
 
-        string Mark(QuickTool t, string label) => _tool == t ? $"> {label}" : label;
+        string Mark(SlotId slot, string label) =>
+            _activeSlot == slot ? $"> {label}" : label;
 
-        void RefreshSeedButtons()
+        void RefreshAllPanels()
         {
-            for (int i = _seedButtonRoot.childCount - 1; i >= 0; i--)
+            RefreshShopPanel();
+            RefreshContextPanel();
+            RefreshQuickSlots();
+            if (_inventoryOpen) RefreshInventoryPanel();
+            if (_groundMenuMode != GroundMenuMode.Closed) RefreshGroundMenu();
+            RefreshHud();
+        }
+
+        void CloseGroundMenu()
+        {
+            _groundMenuMode = GroundMenuMode.Closed;
+            if (_groundMenuRoot != null) _groundMenuRoot.SetActive(false);
+        }
+
+        void OpenGroundMenu(int x, int y)
+        {
+            _groundMenuCell = new Vector2Int(x, y);
+            _groundMenuMode = GroundMenuMode.Actions;
+            _groundMenuRoot.SetActive(true);
+            RefreshGroundMenu();
+            _status = $"땅 메뉴 ({x},{y})";
+        }
+
+        void RefreshGroundMenu()
+        {
+            if (_groundMenuRoot == null || _groundMenuMode == GroundMenuMode.Closed) return;
+            ClearChildren(_groundMenuContent);
+            var bg = _groundMenuRoot.GetComponent<Image>();
+            if (bg == null)
             {
-                Transform c = _seedButtonRoot.GetChild(i);
-                if (c.name == "SeedTitle") continue;
-                Destroy(c.gameObject);
+                bg = _groundMenuRoot.AddComponent<Image>();
+                bg.color = new Color(0.1f, 0.12f, 0.16f, 0.96f);
             }
+
+            int x = _groundMenuCell.x;
+            int y = _groundMenuCell.y;
+            FarmCell cell = _grid.Get(x, y);
+
+            if (_groundMenuMode == GroundMenuMode.PickSeed)
+            {
+                MakeText(_groundMenuContent, "T", Ui(12, -10), 16).text = $"씨앗 선택 ({x},{y})";
+                var seeds = _inv.Seeds;
+                if (seeds.Count == 0)
+                {
+                    MakeText(_groundMenuContent, "E", Ui(12, -44), 13).text = "씨앗 없음";
+                    MakeButton(_groundMenuContent, "뒤로", Ui(12, -90), () =>
+                    {
+                        _groundMenuMode = GroundMenuMode.Actions;
+                        RefreshGroundMenu();
+                    }, 260f * UiScale);
+                    return;
+                }
+
+                for (int i = 0; i < seeds.Count; i++)
+                {
+                    int index = i;
+                    SeedStack s = seeds[i];
+                    string label = $"성장{s.Stats.GrowthSpeed} 드랍{s.Stats.DropRate}  ×{s.Count}";
+                    MakeButton(_groundMenuContent, label, Ui(12, -44 - 38 * i), () =>
+                    {
+                        if (_grid.TryPlant(x, y, s.Stats, _inv))
+                        {
+                            _status = $"심기 성장{s.Stats.GrowthSpeed}/드랍{s.Stats.DropRate}";
+                            CloseGroundMenu();
+                            RefreshAllPanels();
+                        }
+                        else
+                        {
+                            _status = cell.IsEmpty ? "심기 실패" : "빈 칸에만 심기";
+                            RefreshGroundMenu();
+                        }
+                    }, 260f * UiScale);
+                }
+
+                MakeButton(_groundMenuContent, "뒤로", Ui(12, -44 - 38 * seeds.Count), () =>
+                {
+                    _groundMenuMode = GroundMenuMode.Actions;
+                    RefreshGroundMenu();
+                }, 260f * UiScale);
+                return;
+            }
+
+            MakeText(_groundMenuContent, "T", Ui(12, -10), 16).text = $"땅 ({x},{y})";
+            MakeButton(_groundMenuContent, "씨앗 심기", Ui(12, -48), () =>
+            {
+                _groundMenuMode = GroundMenuMode.PickSeed;
+                RefreshGroundMenu();
+            }, 260f * UiScale);
+            MakeButton(_groundMenuContent, "교접 지지대", Ui(12, -90), () =>
+            {
+                if (_grid.TryPlaceBreedingSupport(x, y, _inv))
+                {
+                    _status = "교접 성공";
+                    CloseGroundMenu();
+                    RefreshAllPanels();
+                }
+                else
+                {
+                    _status = _inv.Supports <= 0 ? "지지대 없음" : "빈칸+부모≥1 필요";
+                    RefreshGroundMenu();
+                }
+            }, 260f * UiScale);
+            MakeButton(_groundMenuContent, "파내기", Ui(12, -132), () =>
+            {
+                if (_grid.TryDigOut(x, y))
+                {
+                    _status = $"파냄 ({x},{y})";
+                    CloseGroundMenu();
+                    RefreshAllPanels();
+                }
+                else
+                {
+                    _status = "작물 칸만 파내기";
+                    RefreshGroundMenu();
+                }
+            }, 260f * UiScale);
+            MakeButton(_groundMenuContent, "닫기", Ui(12, -180), CloseGroundMenu, 260f * UiScale);
+        }
+
+        void RefreshInventoryPanel()
+        {
+            ClearChildren(_inventoryContent);
+            // 배경 Image는 ClearChildren이 지우므로 다시
+            var bg = _inventoryRoot.GetComponent<Image>();
+            if (bg == null)
+            {
+                bg = _inventoryRoot.AddComponent<Image>();
+                bg.color = new Color(0.08f, 0.1f, 0.14f, 0.94f);
+            }
+
+            float y = -12f;
+            MakeText(_inventoryContent, "InvTitle", Ui(16, y), 18).text = "인벤토리";
+            y -= 36f;
+
+            MakeText(_inventoryContent, "SecSeed", Ui(16, y), 15).text = "—— 씨앗 ——";
+            y -= 28f;
 
             var seeds = _inv.Seeds;
             if (seeds.Count == 0)
             {
-                _selectedSeedIndex = -1;
-                return;
+                MakeText(_inventoryContent, "NoSeed", Ui(24, y), 14).text = "(없음)";
+                y -= 28f;
             }
-
-            if (_selectedSeedIndex < 0 || _selectedSeedIndex >= seeds.Count)
-                _selectedSeedIndex = 0;
-
-            for (int i = 0; i < seeds.Count; i++)
+            else
             {
-                int index = i;
-                SeedStack stack = seeds[i];
-                string mark = index == _selectedSeedIndex ? ">" : " ";
-                MakeButton(_seedButtonRoot, $"{mark}씨앗 {stack.Stats} x{stack.Count}",
-                    Ui(0, -30 - 40 * i), () =>
-                    {
-                        _selectedSeedIndex = index;
-                        _tool = QuickTool.Plant;
-                        _status = $"씨앗 선택: {stack.Stats}";
-                        RefreshSeedButtons();
-                    }, 270f * UiScale);
+                for (int i = 0; i < seeds.Count; i++)
+                {
+                    SeedStack s = seeds[i];
+                    // 직관적 한 줄: 아이콘 대용 박스 + 스탯 + 수량
+                    string line =
+                        $"벼씨앗  성장 {s.Stats.GrowthSpeed}  드랍 {s.Stats.DropRate}   × {s.Count}";
+                    var row = MakeText(_inventoryContent, $"Seed{i}", Ui(20, y), 14);
+                    row.text = line;
+                    row.color = new Color(0.85f, 0.95f, 0.75f);
+                    y -= 26f;
+                }
             }
+
+            y -= 8f;
+            MakeText(_inventoryContent, "SecItem", Ui(16, y), 15).text = "—— 아이템 ——";
+            y -= 28f;
+            MakeText(_inventoryContent, "Rice", Ui(20, y), 14).text = $"벼(작물)     × {_inv.RiceCrops}";
+            y -= 24f;
+            MakeText(_inventoryContent, "Sup", Ui(20, y), 14).text = $"교접 지지대  × {_inv.Supports}";
+            y -= 24f;
+            MakeText(_inventoryContent, "Fert", Ui(20, y), 14).text = $"비료         × {_inv.Fertilizer}";
+            y -= 32f;
+
+            MakeText(_inventoryContent, "SecBld", Ui(16, y), 15).text = "—— 건물 / 도구 ——";
+            y -= 28f;
+            MakeText(_inventoryContent, "Mill", Ui(20, y), 14).text = $"Mill(미배치) × {_inv.MillsInInventory}";
+            y -= 24f;
+            MakeText(_inventoryContent, "Tool", Ui(20, y), 14).text =
+                _inv.OwnsSprayer ? "비료 뿌리개  보유" :
+                _inv.SprayerUnlocked ? "비료 뿌리개  해금됨(미구매)" : "비료 뿌리개  미해금";
+            y -= 36f;
+
+            MakeButton(_inventoryContent, "닫기", Ui(140, y), () =>
+            {
+                _inventoryOpen = false;
+                _inventoryRoot.SetActive(false);
+                if (_invButtonLabel != null) _invButtonLabel.text = "인벤토리";
+            }, 100f * UiScale);
+        }
+
+        void RefreshShopPanel()
+        {
+            ClearChildren(_shopPanel);
+            MakeText(_shopPanel, "ShopTitle", Vector2.zero, 16).text = "상점";
+            MakeButton(_shopPanel, _shopTab == ShopTab.Buy ? ">구매" : "구매", Ui(0, -28), () =>
+            {
+                _shopTab = ShopTab.Buy;
+                RefreshShopPanel();
+            }, 80f * UiScale);
+            MakeButton(_shopPanel, _shopTab == ShopTab.Sell ? ">판매" : "판매", Ui(90, -28), () =>
+            {
+                _shopTab = ShopTab.Sell;
+                RefreshShopPanel();
+            }, 80f * UiScale);
+
+            if (_shopTab == ShopTab.Buy)
+            {
+                float y = -70f;
+                MakeButton(_shopPanel, "벼씨앗 0/0 · 20G", Ui(0, y), () =>
+                {
+                    _status = _inv.TryBuyStarterRiceSeed(1) ? "씨앗 0/0 +1" : "골드 부족";
+                    RefreshAllPanels();
+                }, 280f * UiScale);
+                y -= 38f;
+                MakeButton(_shopPanel, $"지지대 5G", Ui(0, y), () =>
+                {
+                    _status = _inv.TryBuySupport() ? "지지대 +1" : "골드 부족";
+                    RefreshAllPanels();
+                }, 280f * UiScale);
+                y -= 38f;
+                MakeButton(_shopPanel, "Mill 100G", Ui(0, y), () =>
+                {
+                    _status = _inv.TryBuyMill() ? "Mill +1" : "골드 부족";
+                    RefreshAllPanels();
+                }, 280f * UiScale);
+                y -= 38f;
+                if (_inv.SprayerUnlocked && !_inv.OwnsSprayer)
+                {
+                    MakeButton(_shopPanel, "뿌리개 0G", Ui(0, y), () =>
+                    {
+                        _status = _inv.TryBuySprayer() ? "뿌리개 획득" : "실패";
+                        RefreshAllPanels();
+                    }, 280f * UiScale);
+                }
+                else if (!_inv.SprayerUnlocked)
+                    MakeText(_shopPanel, "Hint", Ui(0, y), 12).text = "뿌리개: 첫 비료 후 해금";
+            }
+            else
+            {
+                MakeButton(_shopPanel, $"벼 판매 ({_inv.RiceCrops}×10G)", Ui(0, -70), () =>
+                {
+                    int g = _inv.SellAllRice();
+                    _status = g > 0 ? $"+{g}G" : "팔 벼 없음";
+                    RefreshAllPanels();
+                }, 280f * UiScale);
+                MakeText(_shopPanel, "SellHint", Ui(0, -110), 12).text = "씨앗 판매 불가";
+            }
+        }
+
+        void RefreshContextPanel()
+        {
+            ClearChildren(_contextPanel);
+            switch (_activeSlot)
+            {
+                case SlotId.Hand:
+                    MakeText(_contextPanel, "T", Vector2.zero, 16).text = "맨손";
+                    MakeText(_contextPanel, "H", Ui(0, -28), 13).text =
+                        "좌클릭: Mature 수확 · Mill\n우클릭 짧게: 심기/교접/파내기\n우클릭 길게: 스탯 개봉";
+                    break;
+                case SlotId.Place:
+                    BuildPlaceContext();
+                    break;
+                case SlotId.Obtained0:
+                    MakeText(_contextPanel, "T", Vector2.zero, 16).text = "비료 뿌리개";
+                    MakeText(_contextPanel, "S", Ui(0, -28), 13).text =
+                        $"비료 수량은 인벤 참고\n작물 위 좌클릭 0.5초";
+                    break;
+            }
+        }
+
+        void BuildPlaceContext()
+        {
+            MakeText(_contextPanel, "T", Vector2.zero, 16).text = "배치 (그리드)";
+            string mill = _placeBuilding == PlaceBuilding.Mill
+                ? $"> Mill ×{_inv.MillsInInventory}"
+                : $"Mill ×{_inv.MillsInInventory}";
+            MakeButton(_contextPanel, mill, Ui(0, -36), () =>
+            {
+                if (_inv.MillsInInventory <= 0)
+                {
+                    _status = "Mill 없음";
+                    return;
+                }
+
+                _placeBuilding = PlaceBuilding.Mill;
+                _status = "Mill 배치 모드";
+                RefreshContextPanel();
+            }, 280f * UiScale);
+            if (_inv.MillsInInventory <= 0)
+                MakeText(_contextPanel, "E", Ui(0, -80), 13).text = "보유 건물 없음";
         }
 
         void HandleLeftInput(float tickDelta)
@@ -334,7 +605,7 @@ namespace GuideToNonstopHarvest.Prototype
                 return;
             }
 
-            if (_tool == QuickTool.Spray)
+            if (_activeSlot == SlotId.Obtained0 && _inv.OwnsSprayer)
             {
                 HandleSprayHover(mouse, tickDelta);
                 return;
@@ -348,7 +619,7 @@ namespace GuideToNonstopHarvest.Prototype
 
         void HandleSprayHover(Mouse mouse, float tickDelta)
         {
-            if (mouse.rightButton.wasPressedThisFrame || mouse.rightButton.isPressed)
+            if (mouse.rightButton.isPressed)
             {
                 if (_sprayHolding)
                 {
@@ -375,7 +646,7 @@ namespace GuideToNonstopHarvest.Prototype
             if (cell.Kind != CellKind.Crop)
             {
                 CancelSpray();
-                _status = "작물 칸에만 비료 가능";
+                _status = "작물 칸만";
                 return;
             }
 
@@ -389,93 +660,67 @@ namespace GuideToNonstopHarvest.Prototype
 
             _sprayHoldTicks += tickDelta;
             float t = Mathf.Clamp01(_sprayHoldTicks / FertilizerRules.SprayHoverTicks);
-            _status = $"비료 살포 중… {Mathf.FloorToInt(t * 100f)}%";
-
+            _status = $"살포… {Mathf.FloorToInt(t * 100f)}%";
             if (_sprayHoldTicks < FertilizerRules.SprayHoverTicks) return;
 
-            if (_grid.TrySprayFertilizer(x, y, _inv))
-                _status = $"비료 살포 완료 ({x},{y})";
-            else
-                _status = _inv.Fertilizer <= 0 ? "비료 없음 (Mill로 생산)" : "살포 실패";
-
+            _status = _grid.TrySprayFertilizer(x, y, _inv)
+                ? $"살포 완료 ({x},{y})"
+                : (_inv.Fertilizer <= 0 ? "비료 없음" : "실패");
             CancelSpray();
+            RefreshAllPanels();
         }
 
         void HandleCellClick(int x, int y)
         {
             FarmCell cell = _grid.Get(x, y);
 
-            if (cell.Kind == CellKind.Mill)
+            if (_activeSlot == SlotId.Place)
             {
-                if (_grid.TryCollectMillOutput(x, y, _inv))
+                if (_placeBuilding == PlaceBuilding.Mill)
                 {
-                    _status = "비료 +1";
-                    RefreshQuickSlots();
+                    if (_grid.TryPlaceMill(x, y, _inv))
+                    {
+                        _status = $"Mill ({x},{y})";
+                        if (_inv.MillsInInventory <= 0) _placeBuilding = PlaceBuilding.None;
+                        RefreshAllPanels();
+                    }
+                    else _status = "빈 칸만 배치";
+                }
+                else _status = "건물 선택";
+                return;
+            }
+
+            // 맨손
+            if (_activeSlot == SlotId.Hand)
+            {
+                if (cell.Kind == CellKind.Machine)
+                {
+                    if (_grid.TryInteractMachine(x, y, _inv, out string msg))
+                    {
+                        _status = msg;
+                        RefreshAllPanels();
+                    }
+                    else _status = msg ?? "실패";
                     return;
                 }
 
-                if (_grid.TryStartMill(x, y, _inv))
-                    _status = "Mill 가공 시작 (5초)";
-                else if (cell.MillProcessing)
-                    _status = $"Mill 가공 중 {Mathf.FloorToInt(cell.MillProgress * 100f)}%";
-                else if (cell.MillOutputReady)
-                    _status = "클릭해서 비료 수령";
-                else
-                    _status = "벼(작물) 필요";
-                return;
-            }
-
-            if (cell.IsMature && _tool == QuickTool.Plant)
-            {
-                if (_grid.TryHarvest(x, y, _inv))
-                    _status = $"수확 ({x},{y})";
-                return;
-            }
-
-            if (!cell.IsEmpty)
-            {
-                string fert = cell.Fertilizer.AnyActive ? " [비료]" : "";
-                string stats = cell.StatsRevealed ? cell.Stats.ToString() : "???";
-                _status = $"단계{cell.Stage} {stats}{fert} {Mathf.FloorToInt(cell.Progress * 100f)}%";
-                return;
-            }
-
-            if (_tool == QuickTool.Plant)
-            {
-                if (_selectedSeedIndex < 0 || _selectedSeedIndex >= _inv.Seeds.Count)
+                if (cell.IsMature)
                 {
-                    _status = "심을 씨앗 없음";
+                    if (_grid.TryHarvest(x, y, _inv))
+                    {
+                        _status = $"수확 ({x},{y})";
+                        RefreshAllPanels();
+                    }
+
                     return;
                 }
 
-                RiceStats stats = _inv.Seeds[_selectedSeedIndex].Stats;
-                if (_grid.TryPlant(x, y, stats, _inv))
+                if (!cell.IsEmpty)
                 {
-                    _status = $"심기 {stats}";
-                    RefreshSeedButtons();
+                    string fert = cell.Fertilizer.AnyActive ? " [비료]" : "";
+                    string stats = cell.StatsRevealed ? cell.Stats.ToString() : "???";
+                    _status = $"단계{cell.Stage} {stats}{fert}";
                 }
-                else _status = "심기 실패";
-                return;
-            }
-
-            if (_tool == QuickTool.Breed)
-            {
-                if (_grid.TryPlaceBreedingSupport(x, y, _inv))
-                    _status = "교접 성공 → 우클릭 1초로 스탯 공개";
-                else
-                    _status = _inv.Supports <= 0 ? "지지대 없음" : "부모(상하좌우) ≥1 필요";
-                return;
-            }
-
-            if (_tool == QuickTool.Mill)
-            {
-                if (_grid.TryPlaceMill(x, y, _inv))
-                {
-                    _status = "Mill 배치";
-                    if (_inv.MillsInInventory <= 0) _tool = QuickTool.Plant;
-                    RefreshQuickSlots();
-                }
-                else _status = "Mill 배치 실패";
             }
         }
 
@@ -485,22 +730,110 @@ namespace GuideToNonstopHarvest.Prototype
             if (mouse == null)
             {
                 CancelInspect();
+                CancelHandRight();
                 return;
             }
 
-            // 뿌리개 살포 중 우클릭은 중단만 (스탯 개봉 안 함)
-            if (_tool == QuickTool.Spray && (_sprayHolding || mouse.leftButton.isPressed))
+            bool spraying = _activeSlot == SlotId.Obtained0 && _inv.OwnsSprayer
+                            && (_sprayHolding || mouse.leftButton.isPressed);
+            if (spraying)
             {
                 CancelInspect();
+                CancelHandRight();
                 return;
             }
 
+            // UI 위에서는 땅 입력 무시 (메뉴 버튼 클릭은 허용)
             if (EventSystem.current != null && EventSystem.current.IsPointerOverGameObject())
             {
+                if (!mouse.rightButton.isPressed)
+                {
+                    CancelInspect();
+                    CancelHandRight();
+                }
+
+                return;
+            }
+
+            if (_activeSlot == SlotId.Hand)
+            {
+                HandleHandRight(mouse, tickDelta);
+                return;
+            }
+
+            CancelHandRight();
+            HandleInspectHold(mouse, tickDelta);
+        }
+
+        void HandleHandRight(Mouse mouse, float tickDelta)
+        {
+            if (!mouse.rightButton.isPressed)
+            {
+                if (_handRightPending)
+                {
+                    // 짧게 뗐으면 땅 메뉴 (길게 개봉 완료 시 pending은 이미 해제됨)
+                    if (_handRightHoldTicks < GroundMenuClickMaxTicks)
+                        OpenGroundMenu(_handRightCell.x, _handRightCell.y);
+                    CancelHandRight();
+                }
+
                 CancelInspect();
                 return;
             }
 
+            if (!TryGetCellUnderMouse(out int x, out int y))
+            {
+                CancelHandRight();
+                CancelInspect();
+                return;
+            }
+
+            var key = new Vector2Int(x, y);
+            if (!_handRightPending || _handRightCell != key)
+            {
+                _handRightPending = true;
+                _handRightCell = key;
+                _handRightHoldTicks = 0f;
+                CancelInspect();
+            }
+
+            _handRightHoldTicks += tickDelta;
+
+            // 길게: 작물 스탯 개봉 (짧게 클릭 임계 이후부터 진행 표시)
+            FarmCell cell = _grid.Get(x, y);
+            if (cell.Kind != CellKind.Crop)
+            {
+                CancelInspect();
+                return;
+            }
+
+            if (cell.StatsRevealed)
+            {
+                if (_handRightHoldTicks >= GroundMenuClickMaxTicks)
+                    _status = $"스탯: {cell.Stats}";
+                CancelInspect();
+                return;
+            }
+
+            _inspectHolding = true;
+            _inspectCell = key;
+            _inspectHoldTicks = _handRightHoldTicks;
+            float t = Mathf.Clamp01(_handRightHoldTicks / InspectHoldTicks);
+            if (_handRightHoldTicks >= GroundMenuClickMaxTicks)
+                _status = $"스탯 개봉… {Mathf.FloorToInt(t * 100f)}%";
+
+            if (_handRightHoldTicks < InspectHoldTicks) return;
+
+            cell.StatsRevealed = true;
+            _revealPunchCell = key;
+            _revealPunchTicks = GameTicks.FromSeconds(0.35f);
+            _status = $"개봉! {cell.Stats}";
+            CancelInspect();
+            CancelHandRight();
+        }
+
+        void HandleInspectHold(Mouse mouse, float tickDelta)
+        {
             if (!mouse.rightButton.isPressed)
             {
                 CancelInspect();
@@ -537,7 +870,7 @@ namespace GuideToNonstopHarvest.Prototype
 
             _inspectHoldTicks += tickDelta;
             float t = Mathf.Clamp01(_inspectHoldTicks / InspectHoldTicks);
-            _status = $"스탯 개봉 중… {Mathf.FloorToInt(t * 100f)}%";
+            _status = $"스탯 개봉… {Mathf.FloorToInt(t * 100f)}%";
             if (_inspectHoldTicks < InspectHoldTicks) return;
 
             cell.StatsRevealed = true;
@@ -551,6 +884,12 @@ namespace GuideToNonstopHarvest.Prototype
         {
             _inspectHolding = false;
             _inspectHoldTicks = 0f;
+        }
+
+        void CancelHandRight()
+        {
+            _handRightPending = false;
+            _handRightHoldTicks = 0f;
         }
 
         void CancelSpray()
@@ -591,12 +930,13 @@ namespace GuideToNonstopHarvest.Prototype
                     continue;
                 }
 
-                if (cell.Kind == CellKind.Mill)
+                if (cell.Kind == CellKind.Machine)
                 {
+                    var m = cell.Machine;
                     sr.color = new Color(0.35f, 0.4f, 0.55f);
-                    if (cell.MillOutputReady) label.text = "Mill\n완료!";
-                    else if (cell.MillProcessing)
-                        label.text = $"Mill\n{Mathf.FloorToInt(cell.MillProgress * 100f)}%";
+                    if (m != null && m.OutputReady) label.text = "Mill\n완료!";
+                    else if (m != null && m.HasActiveWip)
+                        label.text = $"Mill\n{Mathf.FloorToInt(m.Progress01 * 100f)}%";
                     else label.text = "Mill";
                     label.color = Color.white;
                     cellTf.localScale = new Vector3(baseScale, baseScale, 1f);
@@ -658,11 +998,16 @@ namespace GuideToNonstopHarvest.Prototype
         void RefreshHud()
         {
             _hudGold.text = $"골드: {_inv.Gold}";
-            _hudInv.text =
-                $"벼:{_inv.RiceCrops}  지지대:{_inv.Supports}  비료:{_inv.Fertilizer}\n" +
-                $"Mill인벤:{_inv.MillsInInventory}  씨앗종류:{_inv.Seeds.Count}";
-            _hudTool.text = ToolStatus(_tool);
+            _hudTool.text = SlotStatus();
             _hudStatus.text = _status;
+            if (_invButtonLabel != null && !_inventoryOpen)
+                _invButtonLabel.text = "인벤토리";
+        }
+
+        static void ClearChildren(Transform root)
+        {
+            for (int i = root.childCount - 1; i >= 0; i--)
+                Object.Destroy(root.GetChild(i).gameObject);
         }
 
         static Vector2 Ui(float x, float y) => new Vector2(x, y) * UiScale;
@@ -684,7 +1029,7 @@ namespace GuideToNonstopHarvest.Prototype
             rt.anchorMin = rt.anchorMax = new Vector2(0, 1);
             rt.pivot = new Vector2(0, 1);
             rt.anchoredPosition = anchoredPos;
-            rt.sizeDelta = new Vector2(700f * UiScale, 80f * UiScale);
+            rt.sizeDelta = new Vector2(700f * UiScale, 100f * UiScale);
             var text = go.AddComponent<Text>();
             text.font = Resources.GetBuiltinResource<Font>("LegacyRuntime.ttf")
                         ?? Resources.GetBuiltinResource<Font>("Arial.ttf");
@@ -708,13 +1053,11 @@ namespace GuideToNonstopHarvest.Prototype
             rt.pivot = new Vector2(0, 1);
             rt.anchoredPosition = anchoredPos;
             rt.sizeDelta = new Vector2(width, 34f * UiScale);
-
             var img = go.AddComponent<Image>();
             img.color = new Color(0.2f, 0.25f, 0.32f, 0.95f);
             var btn = go.AddComponent<Button>();
             btn.targetGraphic = img;
             btn.onClick.AddListener(onClick);
-
             var textGo = new GameObject("Text");
             textGo.transform.SetParent(go.transform, false);
             var trt = textGo.AddComponent<RectTransform>();
@@ -727,7 +1070,7 @@ namespace GuideToNonstopHarvest.Prototype
             text.text = label;
             text.alignment = TextAnchor.MiddleCenter;
             text.color = Color.white;
-            text.fontSize = Mathf.Max(1, Mathf.RoundToInt(14 * UiScale));
+            text.fontSize = Mathf.Max(1, Mathf.RoundToInt(13 * UiScale));
             text.raycastTarget = false;
             return btn;
         }

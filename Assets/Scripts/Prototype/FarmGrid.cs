@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using GuideToNonstopHarvest.Prototype.Machine;
 using UnityEngine;
 
 namespace GuideToNonstopHarvest.Prototype
@@ -7,7 +8,7 @@ namespace GuideToNonstopHarvest.Prototype
     {
         Empty,
         Crop,
-        Mill
+        Machine
     }
 
     /// <summary>
@@ -35,14 +36,10 @@ namespace GuideToNonstopHarvest.Prototype
         public float ElapsedTicks;
         public bool StatsRevealed;
         public FertilizerState Fertilizer;
-
-        // Mill
-        public bool MillProcessing;
-        public bool MillOutputReady;
-        public float MillElapsedTicks;
-        public const float MillProcessTicks = 100f;
+        public MachineBase Machine;
 
         public bool IsEmpty => Kind == CellKind.Empty;
+        public bool IsMill => Kind == CellKind.Machine && Machine is MillMachine;
 
         public int EffectiveGrowTimeTicks
         {
@@ -78,11 +75,6 @@ namespace GuideToNonstopHarvest.Prototype
 
         public bool IsMature => Kind == CellKind.Crop && Stage >= 2;
 
-        public float MillProgress =>
-            Kind == CellKind.Mill && MillProcessing
-                ? Mathf.Clamp01(MillElapsedTicks / MillProcessTicks)
-                : 0f;
-
         public void Clear()
         {
             Kind = CellKind.Empty;
@@ -90,9 +82,7 @@ namespace GuideToNonstopHarvest.Prototype
             ElapsedTicks = 0f;
             StatsRevealed = false;
             Fertilizer = default;
-            MillProcessing = false;
-            MillOutputReady = false;
-            MillElapsedTicks = 0f;
+            Machine = null;
         }
 
         public void Plant(RiceStats stats, bool statsRevealed = false)
@@ -102,30 +92,27 @@ namespace GuideToNonstopHarvest.Prototype
             ElapsedTicks = 0f;
             StatsRevealed = statsRevealed;
             Fertilizer = default;
-            MillProcessing = false;
-            MillOutputReady = false;
-            MillElapsedTicks = 0f;
+            Machine = null;
         }
 
-        public void PlaceMill()
+        public void PlaceMachine(MachineBase machine)
         {
-            Kind = CellKind.Mill;
+            Kind = CellKind.Machine;
             Stats = default;
             ElapsedTicks = 0f;
             StatsRevealed = false;
             Fertilizer = default;
-            MillProcessing = false;
-            MillOutputReady = false;
-            MillElapsedTicks = 0f;
+            Machine = machine;
         }
     }
 
-    /// <summary>5×5 밭. 성장·심기·수확·교접·비료·Mill.</summary>
+    /// <summary>5×5 밭. 성장·심기·수확·교접·비료·기계(DungeonFront식 틱 페이즈).</summary>
     public sealed class FarmGrid
     {
         public const int Size = 5;
 
         readonly FarmCell[,] _cells = new FarmCell[Size, Size];
+        float _tickAccumulator;
 
         static readonly Vector2Int[] Cardinals =
         {
@@ -150,35 +137,42 @@ namespace GuideToNonstopHarvest.Prototype
         public void Tick(float deltaTime)
         {
             float tickDelta = GameTicks.Delta(deltaTime);
+
+            // 작물 성장은 연속 틱 누적
             for (int y = 0; y < Size; y++)
             for (int x = 0; x < Size; x++)
             {
                 FarmCell cell = _cells[x, y];
                 if (cell.Kind == CellKind.Crop && !cell.IsMature)
                     cell.ElapsedTicks += tickDelta;
+            }
 
-                if (cell.Kind == CellKind.Mill && cell.MillProcessing)
-                {
-                    cell.MillElapsedTicks += tickDelta;
-                    if (cell.MillElapsedTicks >= FarmCell.MillProcessTicks)
-                    {
-                        cell.MillProcessing = false;
-                        cell.MillElapsedTicks = 0f;
-                        cell.MillOutputReady = true;
-                    }
-                }
+            // 기계: DungeonFront TickManager처럼 정수 틱마다 Complete → Start
+            _tickAccumulator += tickDelta;
+            while (_tickAccumulator >= 1f)
+            {
+                _tickAccumulator -= 1f;
+                TickMachinesOneStep();
             }
         }
 
-        /// <summary>Mill 산출 대기면 비료 지급.</summary>
-        public bool TryCollectMillOutput(int x, int y, InventoryState inv)
+        void TickMachinesOneStep()
         {
-            if (!InBounds(x, y)) return false;
-            FarmCell cell = _cells[x, y];
-            if (cell.Kind != CellKind.Mill || !cell.MillOutputReady) return false;
-            inv.AddFertilizer(1);
-            cell.MillOutputReady = false;
-            return true;
+            for (int y = 0; y < Size; y++)
+            for (int x = 0; x < Size; x++)
+            {
+                MachineBase m = _cells[x, y].Machine;
+                if (m == null) continue;
+                m.TickCompleteProduction();
+            }
+
+            for (int y = 0; y < Size; y++)
+            for (int x = 0; x < Size; x++)
+            {
+                MachineBase m = _cells[x, y].Machine;
+                if (m == null) continue;
+                m.TickStartProduction();
+            }
         }
 
         public bool TryPlant(int x, int y, RiceStats stats, InventoryState inv)
@@ -220,7 +214,6 @@ namespace GuideToNonstopHarvest.Prototype
             RiceStats child = BreedingRules.Inherit(parents, anyBreedFloor);
             cell.Plant(child, statsRevealed: false);
 
-            // 교접 하한 1회분 소비
             if (anyBreedFloor)
             {
                 for (int i = 0; i < parentCells.Count; i++)
@@ -243,7 +236,6 @@ namespace GuideToNonstopHarvest.Prototype
 
             inv.AddRiceCrop(1);
             cell.ElapsedTicks = 0f;
-            // 1사이클 성장 보너스 소모
             if (cell.Fertilizer.GrowthBonusActive)
             {
                 var f = cell.Fertilizer;
@@ -254,7 +246,16 @@ namespace GuideToNonstopHarvest.Prototype
             return true;
         }
 
-        /// <summary>작물 칸에 비료 살포. 이미 있으면 지속만 갱신.</summary>
+        /// <summary>작물 제거. 수확물·씨앗 반환 없음.</summary>
+        public bool TryDigOut(int x, int y)
+        {
+            if (!InBounds(x, y)) return false;
+            FarmCell cell = _cells[x, y];
+            if (cell.Kind != CellKind.Crop) return false;
+            cell.Clear();
+            return true;
+        }
+
         public bool TrySprayFertilizer(int x, int y, InventoryState inv)
         {
             if (!InBounds(x, y)) return false;
@@ -271,21 +272,45 @@ namespace GuideToNonstopHarvest.Prototype
             FarmCell cell = _cells[x, y];
             if (!cell.IsEmpty) return false;
             if (!inv.TryConsumeMillItem()) return false;
-            cell.PlaceMill();
+            cell.PlaceMachine(new MillMachine());
             return true;
         }
 
-        /// <summary>Mill에 벼 1개 투입해 가공 시작.</summary>
-        public bool TryStartMill(int x, int y, InventoryState inv)
+        /// <summary>
+        /// Mill 클릭: 아웃풋 수령 우선, 아니면 인벤 벼→인풋 투입.
+        /// (DungeonFront 포트 이송 UI의 원클릭 축소판)
+        /// </summary>
+        public bool TryInteractMachine(int x, int y, InventoryState inv, out string message)
         {
+            message = null;
             if (!InBounds(x, y)) return false;
             FarmCell cell = _cells[x, y];
-            if (cell.Kind != CellKind.Mill) return false;
-            if (cell.MillProcessing || cell.MillOutputReady) return false;
-            if (!inv.TryConsumeRiceCrop(1)) return false;
-            cell.MillProcessing = true;
-            cell.MillElapsedTicks = 0f;
-            return true;
+            if (cell.Machine == null) return false;
+
+            MachineBase mill = cell.Machine;
+
+            if (mill.TryTakeOutput(MachineItemId.Fertilizer, 99, out int fertTaken) && fertTaken > 0)
+            {
+                inv.AddFertilizer(fertTaken);
+                message = $"비료 +{fertTaken}";
+                return true;
+            }
+
+            if (inv.RiceCrops > 0 && mill.TryInsert(MachineItemId.CropProduce, 1))
+            {
+                inv.TryConsumeRiceCrop(1);
+                message = "벼 투입 → 자동 가공";
+                return true;
+            }
+
+            if (mill.HasActiveWip)
+            {
+                message = $"가공 중 {Mathf.FloorToInt(mill.Progress01 * 100f)}%";
+                return true;
+            }
+
+            message = inv.RiceCrops <= 0 ? "벼(작물) 필요" : "투입 실패";
+            return false;
         }
     }
 }

@@ -26,10 +26,10 @@ namespace GuideToNonstopHarvest.Prototype
         public static int Clamp(int value) => Mathf.Clamp(value, Min, Max);
 
         /// <summary>
-        /// Mature까지 틱. growTimeTicks = 600 - 80 * 성장속도
-        /// (0→600틱=30초, 5→200틱=10초. 1초=20틱)
+        /// Mature까지 틱. growTimeTicks = 1200 - 200 * 성장속도
+        /// (0→1200틱=60초, 5→200틱=10초. 전 작물 기본. 1초=20틱)
         /// </summary>
-        public int GrowTimeTicks => 600 - 80 * GrowthSpeed;
+        public int GrowTimeTicks => 1200 - 200 * GrowthSpeed;
 
         /// <summary>씨앗 드랍 확률(레거시). 드랍률 효과 미정.</summary>
         public float SeedDropChance => 0.2f + 0.8f * (DropRate / 5f);

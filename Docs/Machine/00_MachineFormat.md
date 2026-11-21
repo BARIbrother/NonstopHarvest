@@ -2,10 +2,17 @@
 
 `Docs/Machine/` 아래 개별 기계 `.md`는 이 양식을 따른다.
 
-## 시간 단위
+## 시간 단위 · 가공 모델
 
 - 게임 시간: **틱**. **1초 = 20틱** (`01_System.md` §0.1).
-- 레시피 **가공 시간**은 틱으로 적는다. (예: 100틱 = 5초)
+- 레시피 **가공 시간**은 `recipeTime`(진행도)으로 적는다.
+- 매 게임 틱마다 `progress += workSpeed`. 체감 초 ≈ `recipeTime / (20 × workSpeed)`.
+- 루프(DungeonFront 참고): **TickComplete**(진행·산출) → **TickStart**(인풋 소비·WIP).
+
+| 레시피 표기 | 의미 |
+|-------------|------|
+| recipeTime | 완성 필요 진행도 |
+| workSpeed | 틱당 진행 (Mill 기본 1) |
 
 ---
 
