@@ -32,7 +32,7 @@ namespace GuideToNonstopHarvest.Prototype
     public sealed class FarmCell
     {
         public CellKind Kind = CellKind.Empty;
-        public RiceStats Stats;
+        public CropStats Stats;
         public float ElapsedTicks;
         public bool StatsRevealed;
         public FertilizerState Fertilizer;
@@ -85,7 +85,7 @@ namespace GuideToNonstopHarvest.Prototype
             Machine = null;
         }
 
-        public void Plant(RiceStats stats, bool statsRevealed = false)
+        public void Plant(CropStats stats, bool statsRevealed = false)
         {
             Kind = CellKind.Crop;
             Stats = stats;
@@ -175,7 +175,7 @@ namespace GuideToNonstopHarvest.Prototype
             }
         }
 
-        public bool TryPlant(int x, int y, RiceStats stats, InventoryState inv)
+        public bool TryPlant(int x, int y, CropStats stats, InventoryState inv)
         {
             if (!InBounds(x, y)) return false;
             FarmCell cell = _cells[x, y];
@@ -191,7 +191,7 @@ namespace GuideToNonstopHarvest.Prototype
             FarmCell cell = _cells[x, y];
             if (!cell.IsEmpty) return false;
 
-            List<RiceStats> parents = new List<RiceStats>(4);
+            List<CropStats> parents = new List<CropStats>(4);
             List<FarmCell> parentCells = new List<FarmCell>(4);
             bool anyBreedFloor = false;
 
@@ -211,7 +211,15 @@ namespace GuideToNonstopHarvest.Prototype
             if (parents.Count < 1) return false;
             if (!inv.TryConsumeSupport()) return false;
 
-            RiceStats child = BreedingRules.Inherit(parents, anyBreedFloor);
+            // 동종 부모만 허용 (이종·향료 교차는 stub)
+            CropSpecies species = parents[0].Species;
+            for (int i = 1; i < parents.Count; i++)
+            {
+                if (parents[i].Species != species)
+                    return false;
+            }
+
+            CropStats child = BreedingRules.Inherit(parents, anyBreedFloor);
             cell.Plant(child, statsRevealed: false);
 
             if (anyBreedFloor)
@@ -234,7 +242,10 @@ namespace GuideToNonstopHarvest.Prototype
             FarmCell cell = _cells[x, y];
             if (!cell.IsMature) return false;
 
-            inv.AddRiceCrop(1);
+            int amount = 1;
+            if (cell.Stats.Species == CropSpecies.Cotton)
+                amount = BreedingRules.CottonHarvestCount(cell.Stats.Secondary);
+            inv.AddCrop(cell.Stats.Species, amount);
             cell.ElapsedTicks = 0f;
             if (cell.Fertilizer.GrowthBonusActive)
             {

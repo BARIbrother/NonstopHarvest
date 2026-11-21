@@ -58,6 +58,10 @@ Gregtech: New Horizons의 **cropsNH** 루프만 떼어, **교배·스탯·티어
 | 감자 | `Docs/Crops/Potato.md` |
 | 당근 | `Docs/Crops/Carrot.md` |
 | 콩 | `Docs/Crops/Bean.md` |
+| 면화 | `Docs/Crops/Cotton.md` (교역 D1) |
+| 향료초 | `Docs/Crops/Spiceleaf.md` (교역 D1) |
+
+교역 시스템: `Docs/Proposal/02_Trade.md`.
 
 양식·전 작물 기본: `Docs/Crops/00_CropFormat.md`.
 

@@ -21,7 +21,7 @@ namespace GuideToNonstopHarvest.Prototype
         const float GroundMenuClickMaxTicks = 5f;
         const int QuickSlotCount = 3;
 
-        enum ShopTab { Buy, Sell }
+        enum ShopTab { Buy, Sell, Trade }
         enum PlaceBuilding { None, Mill }
         enum GroundMenuMode { Closed, Actions, PickSeed }
 
@@ -35,10 +35,14 @@ namespace GuideToNonstopHarvest.Prototype
 
         FarmGrid _grid;
         InventoryState _inv;
+        TradeSystem _trade;
 
         SlotId _activeSlot = SlotId.Hand;
         PlaceBuilding _placeBuilding = PlaceBuilding.None;
         ShopTab _shopTab = ShopTab.Buy;
+        TradeUiScreen _tradeScreen = TradeUiScreen.Board;
+        int _tradeFocusOrderId = -1;
+        float _tradeUiRefreshTicks;
         bool _inventoryOpen;
         string _status = "맨손:수확·기계 | 우클릭:땅메뉴/스탯 | 인벤:중앙하단";
 
@@ -88,6 +92,7 @@ namespace GuideToNonstopHarvest.Prototype
         {
             _grid = new FarmGrid();
             _inv = new InventoryState();
+            _trade = new TradeSystem();
             _pixelSprite = CreatePixelSprite();
             EnsureCamera();
             EnsureEventSystem();
@@ -101,6 +106,18 @@ namespace GuideToNonstopHarvest.Prototype
         {
             float tickDelta = GameTicks.Delta(Time.deltaTime);
             _grid.Tick(Time.deltaTime);
+            _trade.Tick(tickDelta, _inv);
+            // 교역 시한 표시 갱신 (0.5초)
+            if (_shopTab == ShopTab.Trade)
+            {
+                _tradeUiRefreshTicks += tickDelta;
+                if (_tradeUiRefreshTicks >= 10f)
+                {
+                    _tradeUiRefreshTicks = 0f;
+                    RefreshShopPanel();
+                }
+            }
+
             HandleLeftInput(tickDelta);
             HandleRightInput(tickDelta);
             if (_revealPunchTicks > 0f)
@@ -188,8 +205,8 @@ namespace GuideToNonstopHarvest.Prototype
             var shopRt = shopGo.AddComponent<RectTransform>();
             shopRt.anchorMin = shopRt.anchorMax = new Vector2(0, 1);
             shopRt.pivot = new Vector2(0, 1);
-            shopRt.anchoredPosition = Ui(10, -120);
-            shopRt.sizeDelta = Ui(340, 260);
+            shopRt.anchoredPosition = Ui(10, -110);
+            shopRt.sizeDelta = Ui(380, 420);
             _shopPanel = shopGo.transform;
 
             var ctxGo = new GameObject("Context");
@@ -365,12 +382,13 @@ namespace GuideToNonstopHarvest.Prototype
                 {
                     int index = i;
                     SeedStack s = seeds[i];
-                    string label = $"성장{s.Stats.GrowthSpeed} 드랍{s.Stats.DropRate}  ×{s.Count}";
+                    string label =
+                        $"{s.Stats.SpeciesName} 성장{s.Stats.GrowthSpeed} {s.Stats.SecondaryLabel}{s.Stats.Secondary} ×{s.Count}";
                     MakeButton(_groundMenuContent, label, Ui(12, -44 - 38 * i), () =>
                     {
                         if (_grid.TryPlant(x, y, s.Stats, _inv))
                         {
-                            _status = $"심기 성장{s.Stats.GrowthSpeed}/드랍{s.Stats.DropRate}";
+                            _status = $"심기 {s.Stats}";
                             CloseGroundMenu();
                             RefreshAllPanels();
                         }
@@ -406,7 +424,9 @@ namespace GuideToNonstopHarvest.Prototype
                 }
                 else
                 {
-                    _status = _inv.Supports <= 0 ? "지지대 없음" : "빈칸+부모≥1 필요";
+                    _status = _inv.Supports <= 0
+                        ? "지지대 없음"
+                        : "빈칸+동종 부모≥1 필요";
                     RefreshGroundMenu();
                 }
             }, 260f * UiScale);
@@ -458,7 +478,7 @@ namespace GuideToNonstopHarvest.Prototype
                     SeedStack s = seeds[i];
                     // 직관적 한 줄: 아이콘 대용 박스 + 스탯 + 수량
                     string line =
-                        $"벼씨앗  성장 {s.Stats.GrowthSpeed}  드랍 {s.Stats.DropRate}   × {s.Count}";
+                        $"{s.Stats.SpeciesName}씨앗  성장 {s.Stats.GrowthSpeed}  {s.Stats.SecondaryLabel} {s.Stats.Secondary}   × {s.Count}";
                     var row = MakeText(_inventoryContent, $"Seed{i}", Ui(20, y), 14);
                     row.text = line;
                     row.color = new Color(0.85f, 0.95f, 0.75f);
@@ -469,7 +489,14 @@ namespace GuideToNonstopHarvest.Prototype
             y -= 8f;
             MakeText(_inventoryContent, "SecItem", Ui(16, y), 15).text = "—— 아이템 ——";
             y -= 28f;
-            MakeText(_inventoryContent, "Rice", Ui(20, y), 14).text = $"벼(작물)     × {_inv.RiceCrops}";
+            MakeText(_inventoryContent, "Rice", Ui(20, y), 14).text =
+                $"벼(작물)     × {_inv.GetCropCount(CropSpecies.Rice)}";
+            y -= 24f;
+            MakeText(_inventoryContent, "Cotton", Ui(20, y), 14).text =
+                $"면화(작물)   × {_inv.GetCropCount(CropSpecies.Cotton)}";
+            y -= 24f;
+            MakeText(_inventoryContent, "Spice", Ui(20, y), 14).text =
+                $"향료초(작물) × {_inv.GetCropCount(CropSpecies.Spiceleaf)}";
             y -= 24f;
             MakeText(_inventoryContent, "Sup", Ui(20, y), 14).text = $"교접 지지대  × {_inv.Supports}";
             y -= 24f;
@@ -496,60 +523,309 @@ namespace GuideToNonstopHarvest.Prototype
         void RefreshShopPanel()
         {
             ClearChildren(_shopPanel);
+            _trade.TryUnlock(_inv);
+
             MakeText(_shopPanel, "ShopTitle", Vector2.zero, 16).text = "상점";
             MakeButton(_shopPanel, _shopTab == ShopTab.Buy ? ">구매" : "구매", Ui(0, -28), () =>
             {
                 _shopTab = ShopTab.Buy;
                 RefreshShopPanel();
-            }, 80f * UiScale);
-            MakeButton(_shopPanel, _shopTab == ShopTab.Sell ? ">판매" : "판매", Ui(90, -28), () =>
+            }, 72f * UiScale);
+            MakeButton(_shopPanel, _shopTab == ShopTab.Sell ? ">판매" : "판매", Ui(76, -28), () =>
             {
                 _shopTab = ShopTab.Sell;
                 RefreshShopPanel();
-            }, 80f * UiScale);
+            }, 72f * UiScale);
+
+            string tradeLabel = !_trade.Unlocked
+                ? "교역(잠김)"
+                : _shopTab == ShopTab.Trade ? ">교역" : "교역";
+            MakeButton(_shopPanel, tradeLabel, Ui(152, -28), () =>
+            {
+                if (!_trade.Unlocked)
+                {
+                    _status = "교역: 벼 판매 1회 또는 골드≥30";
+                    return;
+                }
+
+                _shopTab = ShopTab.Trade;
+                _tradeScreen = TradeUiScreen.Board;
+                RefreshShopPanel();
+            }, 100f * UiScale);
 
             if (_shopTab == ShopTab.Buy)
+                RefreshShopBuy();
+            else if (_shopTab == ShopTab.Sell)
+                RefreshShopSell();
+            else
+                RefreshTradePanel();
+        }
+
+        void RefreshShopBuy()
+        {
+            float y = -70f;
+            MakeButton(_shopPanel, "벼씨앗 0/0 · 20G", Ui(0, y), () =>
             {
-                float y = -70f;
-                MakeButton(_shopPanel, "벼씨앗 0/0 · 20G", Ui(0, y), () =>
+                _status = _inv.TryBuyStarterRiceSeed(1) ? "벼씨앗 0/0 +1" : "골드 부족";
+                RefreshAllPanels();
+            }, 320f * UiScale);
+            y -= 36f;
+
+            if (_trade.CottonShopUnlocked)
+            {
+                MakeButton(_shopPanel, $"면화씨앗 0/0 · {TradeSystem.CottonSeedPrice}G", Ui(0, y), () =>
                 {
-                    _status = _inv.TryBuyStarterRiceSeed(1) ? "씨앗 0/0 +1" : "골드 부족";
+                    _status = _inv.TryBuyCottonSeed(_trade)
+                        ? "면화씨앗 +1"
+                        : "골드 부족";
                     RefreshAllPanels();
-                }, 280f * UiScale);
-                y -= 38f;
-                MakeButton(_shopPanel, $"지지대 5G", Ui(0, y), () =>
+                }, 320f * UiScale);
+                y -= 36f;
+            }
+
+            if (_trade.SpiceleafShopUnlocked)
+            {
+                MakeButton(_shopPanel, $"향료초씨앗 0/0 · {TradeSystem.SpiceleafSeedPrice}G", Ui(0, y), () =>
                 {
-                    _status = _inv.TryBuySupport() ? "지지대 +1" : "골드 부족";
+                    _status = _inv.TryBuySpiceleafSeed(_trade)
+                        ? "향료초씨앗 +1"
+                        : "골드 부족";
                     RefreshAllPanels();
-                }, 280f * UiScale);
-                y -= 38f;
-                MakeButton(_shopPanel, "Mill 100G", Ui(0, y), () =>
+                }, 320f * UiScale);
+                y -= 36f;
+            }
+
+            MakeButton(_shopPanel, "지지대 5G", Ui(0, y), () =>
+            {
+                _status = _inv.TryBuySupport() ? "지지대 +1" : "골드 부족";
+                RefreshAllPanels();
+            }, 320f * UiScale);
+            y -= 36f;
+            MakeButton(_shopPanel, "Mill 100G", Ui(0, y), () =>
+            {
+                _status = _inv.TryBuyMill() ? "Mill +1" : "골드 부족";
+                RefreshAllPanels();
+            }, 320f * UiScale);
+            y -= 36f;
+            if (_inv.SprayerUnlocked && !_inv.OwnsSprayer)
+            {
+                MakeButton(_shopPanel, "뿌리개 0G", Ui(0, y), () =>
                 {
-                    _status = _inv.TryBuyMill() ? "Mill +1" : "골드 부족";
+                    _status = _inv.TryBuySprayer() ? "뿌리개 획득" : "실패";
                     RefreshAllPanels();
-                }, 280f * UiScale);
-                y -= 38f;
-                if (_inv.SprayerUnlocked && !_inv.OwnsSprayer)
+                }, 320f * UiScale);
+            }
+            else if (!_inv.SprayerUnlocked)
+                MakeText(_shopPanel, "Hint", Ui(0, y), 12).text = "뿌리개: 첫 비료 후 해금";
+
+            if (!_trade.CottonShopUnlocked && _trade.Unlocked)
+            {
+                y -= 28f;
+                MakeText(_shopPanel, "CottonLock", Ui(0, y), 11).text =
+                    $"면화씨앗: 평판 {TradeSystem.CottonRepUnlock}(상인) 해금";
+            }
+        }
+
+        void RefreshShopSell()
+        {
+            float y = -70f;
+            MakeButton(_shopPanel,
+                $"벼 판매 ({_inv.GetCropCount(CropSpecies.Rice)}×10G)", Ui(0, y), () =>
                 {
-                    MakeButton(_shopPanel, "뿌리개 0G", Ui(0, y), () =>
-                    {
-                        _status = _inv.TryBuySprayer() ? "뿌리개 획득" : "실패";
-                        RefreshAllPanels();
-                    }, 280f * UiScale);
-                }
-                else if (!_inv.SprayerUnlocked)
-                    MakeText(_shopPanel, "Hint", Ui(0, y), 12).text = "뿌리개: 첫 비료 후 해금";
+                    int g = _inv.SellAllRice();
+                    _trade.TryUnlock(_inv);
+                    _status = g > 0 ? $"+{g}G" : "팔 벼 없음";
+                    RefreshAllPanels();
+                }, 320f * UiScale);
+            y -= 36f;
+            MakeButton(_shopPanel,
+                $"면화 판매 ({_inv.GetCropCount(CropSpecies.Cotton)}×3G)", Ui(0, y), () =>
+                {
+                    int g = _inv.SellAllOf(CropSpecies.Cotton);
+                    _status = g > 0 ? $"+{g}G" : "팔 면화 없음";
+                    RefreshAllPanels();
+                }, 320f * UiScale);
+            y -= 36f;
+            MakeButton(_shopPanel,
+                $"향료초 판매 ({_inv.GetCropCount(CropSpecies.Spiceleaf)}×~8G)", Ui(0, y), () =>
+                {
+                    int g = _inv.SellAllOf(CropSpecies.Spiceleaf);
+                    _status = g > 0 ? $"+{g}G" : "팔 향료초 없음";
+                    RefreshAllPanels();
+                }, 320f * UiScale);
+            y -= 36f;
+            MakeText(_shopPanel, "SellHint", Ui(0, y), 12).text = "씨앗 판매 불가 · 교역 납품과 별개";
+        }
+
+        void RefreshTradePanel()
+        {
+            switch (_tradeScreen)
+            {
+                case TradeUiScreen.Detail:
+                    RefreshTradeDetail();
+                    break;
+                case TradeUiScreen.Deliver:
+                    RefreshTradeDeliver();
+                    break;
+                case TradeUiScreen.Reward:
+                    RefreshTradeReward();
+                    break;
+                default:
+                    RefreshTradeBoard();
+                    break;
+            }
+        }
+
+        void RefreshTradeBoard()
+        {
+            MakeText(_shopPanel, "TradeHead", Ui(0, -64), 14).text =
+                $"교역 · 평판 {_trade.TierName} {_trade.Reputation} · 진행 {_trade.Active.Count}/{TradeSystem.MaxActive}";
+
+            float y = -96f;
+            var waiting = _trade.Waiting;
+            if (waiting.Count == 0)
+            {
+                MakeText(_shopPanel, "Empty", Ui(0, y), 12).text = "대기 주문 없음";
+                y -= 28f;
             }
             else
             {
-                MakeButton(_shopPanel, $"벼 판매 ({_inv.RiceCrops}×10G)", Ui(0, -70), () =>
+                for (int i = 0; i < waiting.Count; i++)
                 {
-                    int g = _inv.SellAllRice();
-                    _status = g > 0 ? $"+{g}G" : "팔 벼 없음";
-                    RefreshAllPanels();
-                }, 280f * UiScale);
-                MakeText(_shopPanel, "SellHint", Ui(0, -110), 12).text = "씨앗 판매 불가";
+                    TradeOrder o = waiting[i];
+                    int id = o.Id;
+                    string line =
+                        $"{o.Title} | {TradeSystem.DisplayName(o.Species)}×{o.RequiredCount} | {o.RewardGold}G";
+                    MakeButton(_shopPanel, line, Ui(0, y), () =>
+                    {
+                        _tradeFocusOrderId = id;
+                        _tradeScreen = TradeUiScreen.Detail;
+                        RefreshShopPanel();
+                    }, 340f * UiScale);
+                    y -= 34f;
+                }
             }
+
+            y -= 6f;
+            MakeText(_shopPanel, "ActiveTitle", Ui(0, y), 13).text = "—— 진행 중 ——";
+            y -= 26f;
+            var active = _trade.Active;
+            if (active.Count == 0)
+                MakeText(_shopPanel, "NoAct", Ui(0, y), 12).text = "(없음)";
+            else
+            {
+                for (int i = 0; i < active.Count; i++)
+                {
+                    TradeOrder o = active[i];
+                    int id = o.Id;
+                    string line =
+                        $"{o.Title} {TradeSystem.DisplayName(o.Species)} {o.DeliveredCount}/{o.RequiredCount} · {TradeSystem.FormatRemaining(o.RemainingTicks)}";
+                    MakeButton(_shopPanel, line, Ui(0, y), () =>
+                    {
+                        _tradeFocusOrderId = id;
+                        _tradeScreen = TradeUiScreen.Deliver;
+                        RefreshShopPanel();
+                    }, 340f * UiScale);
+                    y -= 34f;
+                }
+            }
+        }
+
+        void RefreshTradeDetail()
+        {
+            TradeOrder o = _trade.FindWaiting(_tradeFocusOrderId);
+            if (o == null)
+            {
+                _tradeScreen = TradeUiScreen.Board;
+                RefreshTradeBoard();
+                return;
+            }
+
+            int have = _inv.GetCropCount(o.Species);
+            MakeText(_shopPanel, "DTitle", Ui(0, -64), 15).text = o.Title;
+            MakeText(_shopPanel, "DNeed", Ui(0, -92), 13).text =
+                $"요구 {TradeSystem.DisplayName(o.Species)} × {o.RequiredCount}  (보유 {have})";
+            MakeText(_shopPanel, "DRew", Ui(0, -118), 13).text =
+                $"보상 {o.RewardGold}G · 평판 +{o.ReputationReward} · 시한 약 {TradeSystem.FormatRemaining(o.TimeLimitTicks)}";
+            MakeText(_shopPanel, "DHint", Ui(0, -144), 11).text =
+                "수락 후 시한 시작 · 1차 전량 납품";
+
+            MakeButton(_shopPanel, "수락", Ui(0, -180), () =>
+            {
+                if (_trade.TryAccept(o.Id, out string msg))
+                {
+                    _status = msg;
+                    _tradeFocusOrderId = o.Id;
+                    _tradeScreen = TradeUiScreen.Deliver;
+                }
+                else _status = msg;
+                RefreshAllPanels();
+            }, 100f * UiScale);
+            MakeButton(_shopPanel, "거절", Ui(110, -180), () =>
+            {
+                _trade.TryReject(o.Id, _inv, out string msg);
+                _status = msg;
+                _tradeScreen = TradeUiScreen.Board;
+                RefreshAllPanels();
+            }, 100f * UiScale);
+            MakeButton(_shopPanel, "닫기", Ui(220, -180), () =>
+            {
+                _tradeScreen = TradeUiScreen.Board;
+                RefreshShopPanel();
+            }, 100f * UiScale);
+        }
+
+        void RefreshTradeDeliver()
+        {
+            TradeOrder o = _trade.FindActive(_tradeFocusOrderId);
+            if (o == null)
+            {
+                _tradeScreen = TradeUiScreen.Board;
+                RefreshTradeBoard();
+                return;
+            }
+
+            int need = o.RequiredCount - o.DeliveredCount;
+            int have = _inv.GetCropCount(o.Species);
+            MakeText(_shopPanel, "DelTitle", Ui(0, -64), 15).text = $"납품 · {o.Title}";
+            MakeText(_shopPanel, "DelTime", Ui(0, -92), 13).text =
+                $"남은 {TradeSystem.FormatRemaining(o.RemainingTicks)} · 필요 {need} · 보유 {have}";
+            MakeText(_shopPanel, "DelHint", Ui(0, -118), 11).text =
+                "1차: 전량만 납품 (T04) · Mill 산출 납품 없음";
+
+            MakeButton(_shopPanel, $"전량 납품 ({need})", Ui(0, -160), () =>
+            {
+                if (_trade.TryDeliverFull(o.Id, _inv, out string msg))
+                {
+                    _status = msg;
+                    _tradeScreen = TradeUiScreen.Reward;
+                }
+                else _status = msg;
+                RefreshAllPanels();
+            }, 200f * UiScale);
+            MakeButton(_shopPanel, "보드로", Ui(210, -160), () =>
+            {
+                _tradeScreen = TradeUiScreen.Board;
+                RefreshShopPanel();
+            }, 100f * UiScale);
+        }
+
+        void RefreshTradeReward()
+        {
+            TradeOrder o = _trade.LastRewardOrder;
+            MakeText(_shopPanel, "RTitle", Ui(0, -64), 15).text =
+                o != null ? $"완료 · {o.Title}" : "정산";
+            MakeText(_shopPanel, "RGold", Ui(0, -100), 18).text =
+                $"+{_trade.LastRewardGold} G";
+            MakeText(_shopPanel, "RRep", Ui(0, -132), 16).text =
+                $"평판 +{_trade.LastRewardRep} → {_trade.TierName} {_trade.Reputation}";
+            MakeText(_shopPanel, "RMsg", Ui(0, -164), 12).text = _trade.LastRewardMessage;
+
+            MakeButton(_shopPanel, "보드로", Ui(0, -200), () =>
+            {
+                _tradeScreen = TradeUiScreen.Board;
+                RefreshAllPanels();
+            }, 160f * UiScale);
         }
 
         void RefreshContextPanel()
@@ -706,9 +982,10 @@ namespace GuideToNonstopHarvest.Prototype
 
                 if (cell.IsMature)
                 {
+                    string cropName = cell.Stats.SpeciesName;
                     if (_grid.TryHarvest(x, y, _inv))
                     {
-                        _status = $"수확 ({x},{y})";
+                        _status = $"수확 {cropName} ({x},{y})";
                         RefreshAllPanels();
                     }
 
@@ -943,11 +1220,33 @@ namespace GuideToNonstopHarvest.Prototype
                     continue;
                 }
 
-                switch (cell.Stage)
+                // Species 틴트: 벼=녹/황, 면화=회백, 향료=갈녹
+                if (cell.Stats.Species == CropSpecies.Cotton)
                 {
-                    case 0: sr.color = new Color(0.55f, 0.75f, 0.35f); break;
-                    case 1: sr.color = new Color(0.25f, 0.65f, 0.25f); break;
-                    default: sr.color = new Color(0.95f, 0.82f, 0.25f); break;
+                    switch (cell.Stage)
+                    {
+                        case 0: sr.color = new Color(0.7f, 0.75f, 0.65f); break;
+                        case 1: sr.color = new Color(0.85f, 0.88f, 0.8f); break;
+                        default: sr.color = new Color(0.95f, 0.95f, 0.92f); break;
+                    }
+                }
+                else if (cell.Stats.Species == CropSpecies.Spiceleaf)
+                {
+                    switch (cell.Stage)
+                    {
+                        case 0: sr.color = new Color(0.45f, 0.55f, 0.3f); break;
+                        case 1: sr.color = new Color(0.35f, 0.5f, 0.22f); break;
+                        default: sr.color = new Color(0.55f, 0.35f, 0.2f); break;
+                    }
+                }
+                else
+                {
+                    switch (cell.Stage)
+                    {
+                        case 0: sr.color = new Color(0.55f, 0.75f, 0.35f); break;
+                        case 1: sr.color = new Color(0.25f, 0.65f, 0.25f); break;
+                        default: sr.color = new Color(0.95f, 0.82f, 0.25f); break;
+                    }
                 }
 
                 if (cell.Fertilizer.AnyActive)
@@ -959,7 +1258,9 @@ namespace GuideToNonstopHarvest.Prototype
                 if (cell.StatsRevealed)
                 {
                     string f = cell.Fertilizer.AnyActive ? "F" : "";
-                    label.text = $"S{cell.Stage}{f}\n{cell.Stats.GrowthSpeed}/{cell.Stats.DropRate}";
+                    string tag = cell.Stats.Species == CropSpecies.Rice ? ""
+                        : cell.Stats.Species == CropSpecies.Cotton ? "면" : "향";
+                    label.text = $"S{cell.Stage}{f}{tag}\n{cell.Stats.GrowthSpeed}/{cell.Stats.Secondary}";
                     label.color = cell.IsMature ? Color.black : Color.white;
                 }
                 else if (inspecting || spraying)
@@ -997,7 +1298,10 @@ namespace GuideToNonstopHarvest.Prototype
 
         void RefreshHud()
         {
-            _hudGold.text = $"골드: {_inv.Gold}";
+            string tradeHud = _trade.Unlocked
+                ? $" · 평판 {_trade.TierName}{_trade.Reputation}"
+                : "";
+            _hudGold.text = $"골드: {_inv.Gold}{tradeHud}";
             _hudTool.text = SlotStatus();
             _hudStatus.text = _status;
             if (_invButtonLabel != null && !_inventoryOpen)
